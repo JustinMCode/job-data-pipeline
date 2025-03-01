@@ -1,11 +1,11 @@
 import psycopg2
 import pandas as pd
-import boto3
 from io import BytesIO
 from psycopg2.extras import execute_values
 from psycopg2.pool import SimpleConnectionPool
-from src.config import AWS_ACCESS_KEY, AWS_SECRET_KEY, S3_BUCKET, DB_HOST, DB_NAME, DB_USER, DB_PASS, DB_PORT
+from src.config import S3_BUCKET, DB_HOST, DB_NAME, DB_USER, DB_PASS, DB_PORT
 from src.logger import logger
+from src.s3_client import get_s3_client
 
 # Initialize a connection pool (min 1, max 10)
 pool = SimpleConnectionPool(
@@ -18,11 +18,7 @@ pool = SimpleConnectionPool(
 )
 
 def load_data_to_postgres():
-    s3 = boto3.client(
-        "s3",
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY
-    )
+    s3 = get_s3_client()
     try:
         response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix="processed_data/")
         if "Contents" not in response or len(response["Contents"]) == 0:

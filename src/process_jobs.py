@@ -1,12 +1,12 @@
 import json
 import re
 import pandas as pd
-import boto3
 from io import BytesIO
 from datetime import datetime
-from dateutil.parser import parse  # For flexible date parsing
-from src.config import AWS_ACCESS_KEY, AWS_SECRET_KEY, S3_BUCKET
+from dateutil.parser import parse  
+from src.config import S3_BUCKET
 from src.logger import logger
+from src.s3_client import get_s3_client
 import hashlib
 
 def clean_salary(salary_str):
@@ -35,12 +35,7 @@ def generate_job_hash(job_title, employer_name, job_location, date_posted, job_a
 
 def process_jobs():
     try:
-        s3 = boto3.client(
-            "s3",
-            aws_access_key_id=AWS_ACCESS_KEY,
-            aws_secret_access_key=AWS_SECRET_KEY
-        )
-
+        s3 = get_s3_client()
         response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix="raw_data/")
         if "Contents" not in response or len(response["Contents"]) == 0:
             logger.warning("No raw data found in S3.")

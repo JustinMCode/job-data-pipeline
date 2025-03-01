@@ -1,12 +1,11 @@
-# src/fetch_jobs.py
 import requests
 import json
 from datetime import datetime
-import boto3
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from requests.exceptions import RequestException
-from src.config import RAPIDAPI_KEY, S3_BUCKET, AWS_ACCESS_KEY, AWS_SECRET_KEY
+from src.config import RAPIDAPI_KEY, S3_BUCKET
 from src.logger import logger
+from src.s3_client import get_s3_client
 
 @retry(wait=wait_exponential(multiplier=1, min=4, max=10), stop=stop_after_attempt(5),
        retry=retry_if_exception_type(RequestException))
@@ -35,7 +34,6 @@ def fetch_jobs():
     
     return response.json()
 
-
 def main_fetch():
     try:
         job_data = fetch_jobs()
@@ -43,11 +41,7 @@ def main_fetch():
         # Print the complete JSON response to the console for inspection.
         print(json.dumps(job_data, indent=2))
         
-        s3 = boto3.client(
-            "s3",
-            aws_access_key_id=AWS_ACCESS_KEY,
-            aws_secret_access_key=AWS_SECRET_KEY
-        )
+        s3 = get_s3_client()
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         file_name = f"jobs_{timestamp}.json"
         s3_key = f"raw_data/{file_name}"
@@ -60,5 +54,3 @@ def main_fetch():
 
 if __name__ == "__main__":
     main_fetch()
-
-
