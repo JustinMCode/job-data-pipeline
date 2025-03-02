@@ -6,7 +6,7 @@ from psycopg2.pool import SimpleConnectionPool
 from datetime import datetime
 from src.config import S3_BUCKET, DB_HOST, DB_NAME, DB_USER, DB_PASS, DB_PORT
 from src.logger import logger
-from src.s3_client import get_s3_client
+from src.clients.s3_client import get_s3_client
 
 # Initialize a connection pool (min 1, max 10)
 pool = SimpleConnectionPool(

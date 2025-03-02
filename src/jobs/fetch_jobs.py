@@ -5,7 +5,7 @@ from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_excep
 from requests.exceptions import RequestException
 from src.config import RAPIDAPI_KEY, S3_BUCKET
 from src.logger import logger
-from src.s3_client import get_s3_client
+from src.clients.s3_client import get_s3_client
 
 @retry(wait=wait_exponential(multiplier=1, min=4, max=10), stop=stop_after_attempt(5),
        retry=retry_if_exception_type(RequestException))

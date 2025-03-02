@@ -1,7 +1,7 @@
 # main.py
-from src.fetch_jobs import main_fetch
-from src.process_jobs import process_jobs
-from src.load_to_postgresql import load_data_to_postgres
+from src.jobs.fetch_jobs import main_fetch
+from src.jobs.process_jobs import process_jobs
+from src.jobs.load_to_postgresql import load_data_to_postgres
 from src.logger import logger
 
 def main(): 
