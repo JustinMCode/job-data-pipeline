@@ -93,16 +93,19 @@ def process_csv_chunks(csv_data: bytes, chunk_size: int = 1000) -> List[Tuple]:
                 errors='coerce',
                 utc=True
             ).dt.tz_convert(None)
-
+            
+            # Iterate over rows in the chunk and replace NaN values with None
             for row in chunk[REQUIRED_COLUMNS].itertuples(index=False, name=None):
-                processed_row = list(row)
+                # Use a list comprehension to convert each value:
+                processed_row = [None if pd.isnull(value) else value for value in row]
                 
-                # Properly handle NaT values
-                if pd.isnull(processed_row[16]):  # Index 16 is date_posted
+                # Ensure that date_posted (index 16) is properly set to None if NaT
+                if pd.isnull(processed_row[16]):
                     processed_row[16] = None
                 
-                # Append current UTC timestamp
+                # Append the current UTC timestamp as integratedTimestamp
                 processed_row.append(datetime.now(timezone.utc))
+                
                 data.append(tuple(processed_row))
                 
     except pd.errors.EmptyDataError:
@@ -111,6 +114,7 @@ def process_csv_chunks(csv_data: bytes, chunk_size: int = 1000) -> List[Tuple]:
         logger.error("Malformed CSV file")
         
     return data
+
 
 def update_database(data: List[Tuple]) -> int:
     """Update database with transaction handling and retry logic."""
