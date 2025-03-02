@@ -90,9 +90,10 @@ def process_jobs():
             # Process job_highlights and extract responsibilities
             job_highlights_obj = job.get("job_highlights", {})
             if job_highlights_obj:
-                job_highlights = json.dumps(job_highlights_obj)
-                responsibilities_list = job_highlights_obj.get("Responsibilities", [])
+                # Remove responsibilities so they're not included in job_highlights
+                responsibilities_list = job_highlights_obj.pop("Responsibilities", [])
                 job_responsibilities = ", ".join(responsibilities_list) if responsibilities_list else ""
+                job_highlights = json.dumps(job_highlights_obj) if job_highlights_obj else ""
             else:
                 job_highlights = ""
                 job_responsibilities = ""
