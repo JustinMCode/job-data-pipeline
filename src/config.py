@@ -20,3 +20,6 @@ DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
 DB_PORT = os.getenv("DB_PORT")
 
+# OpenAI configuration
+OPENAI_KEY = os.getenv("OPENAI_KEY")
+
