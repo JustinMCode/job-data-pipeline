@@ -8,7 +8,11 @@ from datetime import datetime
 from dateutil.parser import parse
 import hashlib
 import asyncio
+from urllib.parse import urlparse
+from dataclasses import dataclass, asdict
+from typing import Optional, List, Dict
 import logging
+from more_itertools import chunked
 
 from src.config import S3_BUCKET
 from src.logger import logger
@@ -19,181 +23,204 @@ from src.ai.openai_processor import (
     simplify_job_responsibilities
 )
 
-def clean_salary(salary_str):
-    """
-    Remove non-numeric characters (except the decimal point) and convert to float.
-    """
+# Constants
+MAX_CONCURRENT_TASKS = 50  # Limit concurrent OpenAI API calls
+CSV_BATCH_SIZE = 1000      # Number of records per CSV buffer flush
+
+@dataclass
+class ProcessedJob:
+    job_title: str
+    employer_name: str
+    job_employment_type: str
+    job_application_link: str
+    job_description: str
+    job_is_remote: bool
+    job_location: str
+    job_city: str
+    job_state: str
+    job_country: str
+    job_benefits: Optional[str]
+    job_salary: Optional[float]
+    job_min_salary: Optional[float]
+    job_max_salary: Optional[float]
+    job_highlights: Optional[str]
+    job_responsibilities: Optional[str]
+    date_posted: Optional[datetime]
+    job_hash: str
+
+def clean_salary(salary_str: str) -> Optional[float]:
+    """Handle international number formats and currency symbols"""
     if not salary_str:
         return None
-    cleaned = re.sub(r"[^\d\.]", "", salary_str)
+    
     try:
+        # Remove commas used as thousand separators and currency symbols
+        cleaned = re.sub(r"[^\d.]", "", salary_str.replace(",", ""))
         return float(cleaned) if cleaned else None
-    except ValueError:
+    except (ValueError, TypeError):
         return None
 
-def generate_job_hash(job_title, employer_name, job_location, date_posted, job_application_link):
-    """
-    Generate a SHA-256 hash based on key job fields.
-    """
-    title_norm = job_title.strip().lower() if job_title else ""
-    employer_norm = employer_name.strip().lower() if employer_name else ""
-    location_norm = job_location.strip().lower() if job_location else ""
-    date_norm = date_posted.isoformat() if date_posted else ""
-    link_norm = job_application_link.strip().lower() if job_application_link else ""
-    hash_input = f"{title_norm}|{employer_norm}|{location_norm}|{date_norm}|{link_norm}"
+def validate_url(link: str) -> bool:
+    """Validate URL format"""
+    try:
+        result = urlparse(link)
+        return all([result.scheme, result.netloc])
+    except:
+        return False
+
+def generate_job_hash(job: dict) -> str:
+    """Generate consistent hash from job data"""
+    hash_input = (
+        f"{job.get('job_title', '').strip().lower()}|"
+        f"{job.get('employer_name', '').strip().lower()}|"
+        f"{job.get('job_location', '').strip().lower()}|"
+        f"{job.get('job_posted_at_datetime_utc', '')}|"
+        f"{job.get('job_apply_link', '').strip().lower()}"
+    )
     return hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
 
-async def process_job_async(job: dict) -> dict:
-    """
-    Process a single job entry asynchronously.
-    Includes text simplification for description, highlights, and responsibilities.
-    """
-    # Parse the posting date
-    date_posted_str = job.get("job_posted_at_datetime_utc", "")
-    try:
-        date_posted = parse(date_posted_str, fuzzy=True) if date_posted_str else None
-    except Exception:
-        logger.warning(f"Failed to parse date '{date_posted_str}', setting as None.")
-        date_posted = None
-
-    # Clean salary fields
-    raw_min_salary = job.get("job_min_salary", "")
-    raw_max_salary = job.get("job_max_salary", "")
-    job_min_salary = clean_salary(str(raw_min_salary))
-    job_max_salary = clean_salary(str(raw_max_salary))
-    job_salary = job.get("job_salary", None)
-    if job_salary is not None:
+async def process_job_async(job: dict, semaphore: asyncio.Semaphore) -> Optional[ProcessedJob]:
+    """Process a single job with concurrency control and error handling"""
+    async with semaphore:
         try:
-            job_salary = float(job_salary)
-        except Exception:
-            job_salary = None
+            # Parse and validate URL
+            raw_link = job.get("job_apply_link", "")
+            job_application_link = raw_link if validate_url(raw_link) else "INVALID_URL"
 
-    # Extract other fields
-    job_title = job.get("job_title", "")
-    employer_name = job.get("employer_name", "")
-    job_employment_type = job.get("job_employment_type", "")
-    job_application_link = job.get("job_apply_link", "")
-    job_description = job.get("job_description", "")
-    job_is_remote = job.get("job_is_remote", False)
-    job_location = job.get("job_location", "")
-    job_city = job.get("job_city", "")
-    job_state = job.get("job_state", "")
-    job_country = job.get("job_country", "")
-    job_benefits = job.get("job_benefits", "")
+            # Date parsing with multiple fallbacks
+            date_posted = None
+            for date_field in ["job_posted_at_datetime_utc", "date_posted"]:
+                if date_str := job.get(date_field):
+                    try:
+                        date_posted = parse(date_str, fuzzy=True)
+                        break
+                    except Exception as e:
+                        logger.debug(f"Failed to parse {date_field}: {date_str} - {str(e)}")
 
-    # Process job_highlights and extract responsibilities
-    job_highlights_obj = job.get("job_highlights", {})
-    if job_highlights_obj:
-        responsibilities_list = job_highlights_obj.pop("Responsibilities", [])
-        job_responsibilities = ", ".join(responsibilities_list) if responsibilities_list else ""
-        job_highlights = json.dumps(job_highlights_obj) if job_highlights_obj else ""
-    else:
-        job_highlights = ""
-        job_responsibilities = ""
+            # Salary cleaning
+            salaries = {
+                "job_salary": clean_salary(str(job.get("job_salary", ""))),
+                "job_min_salary": clean_salary(str(job.get("job_min_salary", ""))),
+                "job_max_salary": clean_salary(str(job.get("job_max_salary", ""))),
+            }
 
-    # Use job_id if available; otherwise generate a unique hash.
-    job_id = job.get("job_id", "")
-    if job_id:
-        job_hash = job_id
-    else:
-        job_hash = generate_job_hash(job_title, employer_name, job_location, date_posted, job_application_link)
+            # Process job highlights
+            job_highlights_obj = job.get("job_highlights", {})
+            responsibilities = []
+            if job_highlights_obj:
+                responsibilities = job_highlights_obj.pop("Responsibilities", [])
+            
+            # Create base job object
+            base_job = {
+                "job_title": job.get("job_title", ""),
+                "employer_name": job.get("employer_name", ""),
+                "job_employment_type": job.get("job_employment_type", ""),
+                "job_application_link": job_application_link,
+                "job_is_remote": job.get("job_is_remote", False),
+                "job_location": job.get("job_location", ""),
+                "job_city": job.get("job_city", ""),
+                "job_state": job.get("job_state", ""),
+                "job_country": job.get("job_country", ""),
+                "job_benefits": job.get("job_benefits"),
+                "date_posted": date_posted,
+                **salaries,
+                "job_hash": job.get("job_id") or generate_job_hash(job)
+            }
 
-    # Asynchronously simplify text fields concurrently.
-    description_task = asyncio.create_task(simplify_job_description(job_description))
-    highlights_task = asyncio.create_task(simplify_job_highlights(job_highlights))
-    responsibilities_task = asyncio.create_task(simplify_job_responsibilities(job_responsibilities))
+            # Parallel processing of text fields
+            description, highlights, responsibilities = await asyncio.gather(
+                simplify_job_description(job.get("job_description", "")),
+                simplify_job_highlights(json.dumps(job_highlights_obj)),
+                simplify_job_responsibilities(" ".join(responsibilities)),
+            )
 
-    simplified_description, simplified_highlights, simplified_responsibilities = await asyncio.gather(
-        description_task, highlights_task, responsibilities_task
-    )
+            return ProcessedJob(
+                **base_job,
+                job_description=description,
+                job_highlights=highlights,
+                job_responsibilities=responsibilities
+            )
 
-    return {
-        "job_title": job_title,
-        "employer_name": employer_name,
-        "job_employment_type": job_employment_type,
-        "job_application_link": job_application_link,
-        "job_description": simplified_description,
-        "job_is_remote": job_is_remote,
-        "job_location": job_location,
-        "job_city": job_city,
-        "job_state": job_state,
-        "job_country": job_country,
-        "job_benefits": job_benefits,
-        "job_salary": job_salary,
-        "job_min_salary": job_min_salary,
-        "job_max_salary": job_max_salary,
-        "job_highlights": simplified_highlights,
-        "job_responsibilities": simplified_responsibilities,
-        "date_posted": date_posted,
-        "job_hash": job_hash
-    }
+        except Exception as e:
+            job_id = job.get("job_id", "unknown")
+            logger.error(f"Failed to process job {job_id}: {str(e)}", exc_info=True)
+            return None
 
-def process_jobs():
-    """
-    Main function to load raw job data from S3, process each job posting asynchronously,
-    and upload the processed data as CSV back to S3.
-    """
+async def process_job_batch(jobs: List[dict]) -> List[ProcessedJob]:
+    """Process a batch of jobs with concurrency control"""
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+    tasks = [process_job_async(job, semaphore) for job in jobs]
+    results = await asyncio.gather(*tasks)
+    return [job for job in results if job is not None]
+
+async def process_and_upload(s3, jobs_data: List[dict], key: str):
+    """Process jobs and upload to S3 in batches"""
+    processed_jobs = []
+    
+    for batch in chunked(jobs_data, CSV_BATCH_SIZE):
+        batch_result = await process_job_batch(batch)
+        processed_jobs.extend(batch_result)
+        
+        # Convert to DataFrame
+        df = pd.DataFrame([asdict(job) for job in batch_result])
+        
+        # Validate before upload
+        if not df.empty:
+            csv_buffer = BytesIO()
+            df.to_csv(csv_buffer, index=False, escapechar="\\", quoting=1)
+            csv_buffer.seek(0)
+            
+            upload_key = key.replace("raw_data/", "processed_data/").replace(".json", f"_{len(processed_jobs)}.csv")
+            s3.put_object(Bucket=S3_BUCKET, Key=upload_key, Body=csv_buffer.getvalue())
+            logger.info(f"Uploaded batch {upload_key} with {len(df)} records")
+
+    logger.info(f"Total processed jobs: {len(processed_jobs)}/{len(jobs_data)}")
+
+async def fetch_raw_data(s3, key: str) -> List[dict]:
+    """Fetch and validate raw data from S3"""
     try:
-        s3 = get_s3_client()
+        response = s3.get_object(Bucket=S3_BUCKET, Key=key)
+        raw_data = json.loads(response["Body"].read())
+        
+        if not isinstance(raw_data.get("data"), list):
+            raise ValueError("Invalid data format: expected list in 'data' field")
+            
+        return raw_data["data"]
+    except Exception as e:
+        logger.error(f"Failed to fetch/parse raw data from {key}: {str(e)}")
+        raise
+
+async def main_async(s3_client=None):
+    """Async main workflow"""
+    s3 = s3_client or get_s3_client()
+    
+    try:
+        # Find latest raw data file
         response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix="raw_data/")
-        if "Contents" not in response or len(response["Contents"]) == 0:
-            logger.warning("No raw data found in S3.")
+        if not response.get("Contents"):
+            logger.warning("No raw data files found")
             return
 
         latest_obj = max(response["Contents"], key=lambda x: x["LastModified"])
         latest_key = latest_obj["Key"]
+        logger.info(f"Processing latest data file: {latest_key}")
 
-        logger.info(f"Downloading {latest_key}...")
-        raw_obj = s3.get_object(Bucket=S3_BUCKET, Key=latest_key)
-        raw_data = json.loads(raw_obj["Body"].read())
-
-        if "data" not in raw_data:
-            logger.warning(f"No 'data' field in JSON for key {latest_key}. Skipping.")
-            return
-
-        jobs_data = raw_data["data"]
-        logger.info(f"Processing {len(jobs_data)} job postings asynchronously...")
-
-        # Create asynchronous tasks for processing each job.
-        loop = asyncio.get_event_loop()
-        tasks = [process_job_async(job) for job in jobs_data]
-        processed_jobs = loop.run_until_complete(asyncio.gather(*tasks))
-
-        # Define the explicit column order.
-        columns = [
-            "job_title",
-            "employer_name",
-            "job_employment_type",
-            "job_application_link",
-            "job_description",
-            "job_is_remote",
-            "job_location",
-            "job_city",
-            "job_state",
-            "job_country",
-            "job_benefits",
-            "job_salary",
-            "job_min_salary",
-            "job_max_salary",
-            "job_highlights",
-            "job_responsibilities",
-            "date_posted",
-            "job_hash"
-        ]
-        df = pd.DataFrame(processed_jobs, columns=columns)
-        df.drop_duplicates(subset=["job_hash"], inplace=True)
-
-        # Write the DataFrame to a CSV buffer.
-        csv_buffer = BytesIO()
-        df.to_csv(csv_buffer, index=False, na_rep="")
-        csv_buffer.seek(0)
-
-        processed_key = latest_key.replace("raw_data/", "processed_data/").replace(".json", ".csv")
-        s3.put_object(Bucket=S3_BUCKET, Key=processed_key, Body=csv_buffer.getvalue())
-        logger.info(f"Processed data uploaded to s3://{S3_BUCKET}/{processed_key}")
+        # Process and upload
+        jobs_data = await fetch_raw_data(s3, latest_key)
+        await process_and_upload(s3, jobs_data, latest_key)
 
     except Exception as e:
-        logger.error("An error occurred while processing jobs.", exc_info=True)
+        logger.error(f"Critical error in processing pipeline: {str(e)}", exc_info=True)
+        raise
+
+def process_jobs(s3_client=None):
+    """Entry point with proper async handling"""
+    try:
+        asyncio.run(main_async(s3_client))
+    except KeyboardInterrupt:
+        logger.info("Processing interrupted by user")
+    except Exception as e:
+        logger.critical(f"Fatal error in main process: {str(e)}", exc_info=True)
 
 if __name__ == "__main__":
     process_jobs()

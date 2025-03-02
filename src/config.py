@@ -7,6 +7,8 @@ import os
 
 # RapidAPI configuration
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "your_default_rapidapi_key")
+RAPIDAPI_HOST = "jsearch.p.rapidapi.com"
+API_REQUEST_TIMEOUT = 15  # seconds
 
 # AWS S3 configuration
 S3_BUCKET = os.getenv("AWS_BUCKET_NAME")

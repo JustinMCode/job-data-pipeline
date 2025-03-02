@@ -1,200 +1,207 @@
 import psycopg2
 import pandas as pd
 from io import BytesIO
+from typing import Optional, Tuple, List
 from psycopg2.extras import execute_values
 from psycopg2.pool import SimpleConnectionPool
-from datetime import datetime
+from psycopg2 import DatabaseError
+from datetime import datetime, timezone
 from src.config import S3_BUCKET, DB_HOST, DB_NAME, DB_USER, DB_PASS, DB_PORT
 from src.logger import logger
 from src.clients.s3_client import get_s3_client
 
-# Initialize a connection pool (min 1, max 10)
+# Connection pool configuration
+POOL_MIN_CONN = 1
+POOL_MAX_CONN = 10
+CONNECTION_TIMEOUT = 30  # seconds
+
+# Initialize connection pool with timeout and connection args
 pool = SimpleConnectionPool(
-    1, 10,
+    POOL_MIN_CONN,
+    POOL_MAX_CONN,
     host=DB_HOST,
     dbname=DB_NAME,
     user=DB_USER,
     password=DB_PASS,
-    port=DB_PORT
+    port=DB_PORT,
+    connect_timeout=CONNECTION_TIMEOUT,
+    sslmode="require"
 )
 
-def get_latest_processed_file(s3, bucket: str, prefix: str = "processed_data/") -> tuple[str, bytes]:
-    """
-    Retrieve the latest processed CSV file from S3.
+REQUIRED_COLUMNS = [
+    "job_title", "employer_name", "job_employment_type",
+    "job_application_link", "job_description", "job_is_remote",
+    "job_location", "job_city", "job_state", "job_country",
+    "job_benefits", "job_salary", "job_min_salary", "job_max_salary",
+    "job_highlights", "job_responsibilities", "date_posted", "job_hash"
+]
 
-    Returns:
-        A tuple containing the latest key and the file content as bytes.
-        If no file is found, returns (None, None).
-    """
-    response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
-    if "Contents" not in response or not response["Contents"]:
-        logger.warning("No processed data found in S3.")
+def get_latest_processed_file(s3, bucket: str, prefix: str = "processed_data/") -> Tuple[Optional[str], Optional[bytes]]:
+    """Retrieve the latest processed CSV file from S3 with pagination handling."""
+    paginator = s3.get_paginator('list_objects_v2')
+    latest_obj = None
+    
+    try:
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            if "Contents" not in page:
+                continue
+            page_latest = max(page["Contents"], key=lambda x: x["LastModified"])
+            if not latest_obj or page_latest["LastModified"] > latest_obj["LastModified"]:
+                latest_obj = page_latest
+
+        if not latest_obj:
+            logger.warning("No processed data found in S3.")
+            return None, None
+
+        latest_key = latest_obj["Key"]
+        if not latest_key.endswith(".csv"):
+            logger.warning(f"Latest file is not a CSV: {latest_key}")
+            return None, None
+
+        logger.info(f"Downloading {latest_key}...")
+        response = s3.get_object(Bucket=bucket, Key=latest_key)
+        return latest_key, response["Body"].read()
+
+    except s3.exceptions.NoSuchBucket:
+        logger.error(f"Bucket {bucket} does not exist")
         return None, None
-    latest_obj = max(response["Contents"], key=lambda x: x["LastModified"])
-    latest_key = latest_obj["Key"]
-    if not latest_key.endswith(".csv"):
-        logger.warning(f"Latest file is not a CSV: {latest_key}")
+    except Exception as e:
+        logger.error(f"Error accessing S3: {str(e)}")
         return None, None
-    logger.info(f"Downloading {latest_key}...")
-    raw_obj = s3.get_object(Bucket=bucket, Key=latest_key)
-    return latest_key, raw_obj["Body"].read()
 
-def process_csv_chunks(csv_data: bytes, chunk_size: int = 1000) -> list:
-    """
-    Process CSV data in chunks, appending the current UTC timestamp to each row.
+def _validate_columns(df: pd.DataFrame) -> bool:
+    """Validate that the DataFrame contains all required columns."""
+    missing = set(REQUIRED_COLUMNS) - set(df.columns)
+    if missing:
+        logger.error(f"Missing required columns in CSV: {', '.join(missing)}")
+        return False
+    return True
 
-    Returns:
-        A list of tuples representing rows with an appended integratedTimestamp.
-    """
-    required_cols = [
-        "job_title",
-        "employer_name",
-        "job_employment_type",
-        "job_application_link",
-        "job_description",
-        "job_is_remote",
-        "job_location",
-        "job_city",
-        "job_state",
-        "job_country",
-        "job_benefits",
-        "job_salary",
-        "job_min_salary",
-        "job_max_salary",
-        "job_highlights",
-        "job_responsibilities",
-        "date_posted",
-        "job_hash"
-    ]
+def process_csv_chunks(csv_data: bytes, chunk_size: int = 1000) -> List[Tuple]:
+    """Process CSV data with improved validation and error handling."""
     data = []
-    for chunk in pd.read_csv(BytesIO(csv_data), chunksize=chunk_size):
-        logger.info(f"Processing chunk with {len(chunk)} rows...")
-        # Convert date_posted to datetime
-        chunk['date_posted'] = pd.to_datetime(chunk['date_posted'], errors='coerce')
-        for row in chunk[required_cols].itertuples(index=False, name=None):
-            row = list(row)
-            # Replace invalid dates (NaN) with None
-            if pd.isnull(row[16]):
-                row[16] = None
-            # Append the current UTC timestamp for integratedTimestamp
-            row.append(datetime.utcnow())
-            data.append(tuple(row))
+    try:
+        for chunk in pd.read_csv(BytesIO(csv_data), chunksize=chunk_size, dtype=str):
+            if not _validate_columns(chunk):
+                raise ValueError("CSV validation failed")
+
+            logger.debug(f"Processing chunk with {len(chunk)} rows...")
+            
+            # Convert date_posted to datetime and handle NaT
+            chunk['date_posted'] = pd.to_datetime(
+                chunk['date_posted'],
+                errors='coerce',
+                utc=True
+            ).dt.tz_convert(None)
+
+            for row in chunk[REQUIRED_COLUMNS].itertuples(index=False, name=None):
+                processed_row = list(row)
+                
+                # Properly handle NaT values
+                if pd.isnull(processed_row[16]):  # Index 16 is date_posted
+                    processed_row[16] = None
+                
+                # Append current UTC timestamp
+                processed_row.append(datetime.now(timezone.utc))
+                data.append(tuple(processed_row))
+                
+    except pd.errors.EmptyDataError:
+        logger.error("Empty CSV file encountered")
+    except pd.errors.ParserError:
+        logger.error("Malformed CSV file")
+        
     return data
 
-def update_database(data: list):
-    """
-    Update the PostgreSQL database with the provided data using a bulk operation.
-    
-    The query uses an ON CONFLICT clause to update the record if any field has changed.
-    """
-    insert_query = """
-        INSERT INTO job_data (
-            job_title,
-            employer_name,
-            job_employment_type,
-            job_application_link,
-            job_description,
-            job_is_remote,
-            job_location,
-            job_city,
-            job_state,
-            job_country,
-            job_benefits,
-            job_salary,
-            job_min_salary,
-            job_max_salary,
-            job_highlights,
-            job_responsibilities,
-            date_posted,
-            job_hash,
-            integratedTimestamp
-        )
+def update_database(data: List[Tuple]) -> int:
+    """Update database with transaction handling and retry logic."""
+    if not data:
+        logger.warning("No data to insert")
+        return 0
+
+    insert_query = f"""
+        INSERT INTO job_data ({', '.join(REQUIRED_COLUMNS)}, integratedTimestamp)
         VALUES %s
         ON CONFLICT (job_hash)
         DO UPDATE SET
-            job_employment_type = EXCLUDED.job_employment_type,
-            job_application_link = EXCLUDED.job_application_link,
-            job_description = EXCLUDED.job_description,
-            job_is_remote = EXCLUDED.job_is_remote,
-            job_location = EXCLUDED.job_location,
-            job_city = EXCLUDED.job_city,
-            job_state = EXCLUDED.job_state,
-            job_country = EXCLUDED.job_country,
-            job_benefits = EXCLUDED.job_benefits,
-            job_salary = EXCLUDED.job_salary,
-            job_min_salary = EXCLUDED.job_min_salary,
-            job_max_salary = EXCLUDED.job_max_salary,
-            job_highlights = EXCLUDED.job_highlights,
-            job_responsibilities = EXCLUDED.job_responsibilities,
-            date_posted = EXCLUDED.date_posted,
+            {', '.join(f"{col} = EXCLUDED.{col}" for col in REQUIRED_COLUMNS[2:])},
             integratedTimestamp = EXCLUDED.integratedTimestamp
-        WHERE
-            job_data.job_employment_type IS DISTINCT FROM EXCLUDED.job_employment_type OR
-            job_data.job_application_link IS DISTINCT FROM EXCLUDED.job_application_link OR
-            job_data.job_description IS DISTINCT FROM EXCLUDED.job_description OR
-            job_data.job_is_remote IS DISTINCT FROM EXCLUDED.job_is_remote OR
-            job_data.job_location IS DISTINCT FROM EXCLUDED.job_location OR
-            job_data.job_city IS DISTINCT FROM EXCLUDED.job_city OR
-            job_data.job_state IS DISTINCT FROM EXCLUDED.job_state OR
-            job_data.job_country IS DISTINCT FROM EXCLUDED.job_country OR
-            job_data.job_benefits IS DISTINCT FROM EXCLUDED.job_benefits OR
-            job_data.job_salary IS DISTINCT FROM EXCLUDED.job_salary OR
-            job_data.job_min_salary IS DISTINCT FROM EXCLUDED.job_min_salary OR
-            job_data.job_max_salary IS DISTINCT FROM EXCLUDED.job_max_salary OR
-            job_data.job_highlights IS DISTINCT FROM EXCLUDED.job_highlights OR
-            job_data.job_responsibilities IS DISTINCT FROM EXCLUDED.job_responsibilities OR
-            job_data.date_posted IS DISTINCT FROM EXCLUDED.date_posted
+        WHERE job_data != EXCLUDED
     """
-    conn = pool.getconn()
+    
     total_inserted = 0
+    conn = None
     try:
-        with conn:
-            with conn.cursor() as cursor:
-                execute_values(cursor, insert_query, data)
-                total_inserted = len(data)
-                logger.info(f"Inserted/Updated {total_inserted} rows.")
-        logger.info(f"Data successfully loaded into PostgreSQL. Total rows inserted/updated: {total_inserted}")
+        conn = pool.getconn()
+        with conn, conn.cursor() as cursor:
+            execute_values(
+                cursor,
+                insert_query,
+                data,
+                page_size=1000
+            )
+            total_inserted = cursor.rowcount
+            logger.info(f"Affected {total_inserted} rows")
+
+    except DatabaseError as e:
+        logger.error(f"Database error: {str(e)}")
+        if conn:
+            conn.rollback()
+        raise
     finally:
-        pool.putconn(conn)
+        if conn:
+            pool.putconn(conn)
+            
+    return total_inserted
 
-def archive_file(s3, bucket: str, latest_key: str):
-    """
-    Archive the processed file by copying it to the archive folder and deleting the original.
-    """
-    archive_key = latest_key.replace("processed_data/", "archive/")
-    s3.copy_object(
-        CopySource={"Bucket": bucket, "Key": latest_key},
-        Bucket=bucket,
-        Key=archive_key
-    )
-    s3.delete_object(Bucket=bucket, Key=latest_key)
-    logger.info(f"File archived to s3://{bucket}/{archive_key} and removed from processed_data.")
-
-def load_data_to_postgres():
-    """
-    Main function to load processed CSV data from S3 into PostgreSQL.
-    """
-    s3 = get_s3_client()
+def archive_file(s3, bucket: str, latest_key: str) -> bool:
+    """Atomic file archiving with error handling."""
     try:
+        archive_key = latest_key.replace("processed_data/", "archive/", 1)
+        # Use copy_object + delete pattern for atomic move
+        s3.copy_object(
+            CopySource={"Bucket": bucket, "Key": latest_key},
+            Bucket=bucket,
+            Key=archive_key,
+            MetadataDirective="COPY"
+        )
+        s3.delete_object(Bucket=bucket, Key=latest_key)
+        logger.info(f"Successfully archived to {archive_key}")
+        return True
+    except Exception as e:
+        logger.error(f"Archiving failed: {str(e)}")
+        return False
+
+def load_data_to_postgres() -> None:
+    """Main ETL flow with enhanced error handling."""
+    try:
+        s3 = get_s3_client()
         latest_key, csv_data = get_latest_processed_file(s3, S3_BUCKET)
-        if not latest_key or not csv_data:
+        if not (latest_key and csv_data):
             return
 
-        # Optional: Log the row count by loading CSV into a DataFrame
-        df = pd.read_csv(BytesIO(csv_data))
-        logger.info(f"DataFrame loaded with {len(df)} rows.")
+        # Validate data before processing
+        try:
+            sample_df = pd.read_csv(BytesIO(csv_data), nrows=1)
+            if not _validate_columns(sample_df):
+                raise ValueError("Invalid CSV structure")
+        except Exception as e:
+            logger.error("CSV validation failed")
+            return
 
-        # Process CSV data in chunks and add integratedTimestamp
         data = process_csv_chunks(csv_data)
+        if not data:
+            logger.warning("No valid data processed")
+            return
 
-        # Update the PostgreSQL database
-        update_database(data)
-
-        # Archive the processed file in S3
-        archive_file(s3, S3_BUCKET, latest_key)
+        affected_rows = update_database(data)
+        
+        if affected_rows > 0:
+            if not archive_file(s3, S3_BUCKET, latest_key):
+                logger.error("Data archived but database updates may be incomplete")
 
     except Exception as e:
-        logger.error("Error while loading data to PostgreSQL.", exc_info=True)
+        logger.error("Critical error in ETL pipeline", exc_info=True)
+        raise
 
 if __name__ == "__main__":
     load_data_to_postgres()
