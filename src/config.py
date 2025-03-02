@@ -22,4 +22,4 @@ DB_PORT = os.getenv("DB_PORT")
 
 # OpenAI configuration
 OPENAI_KEY = os.getenv("OPENAI_KEY")
-
+OPENAI_MODEL = "gpt-3.5-turbo"
