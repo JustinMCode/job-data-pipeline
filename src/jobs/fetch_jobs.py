@@ -21,7 +21,7 @@ DEFAULT_QUERY_PARAMS = {
     "query": "Data Engineer",
     "location": "USA",
     "page": 1,
-    "num_pages": 5,
+    "num_pages": 1,
     "country": "us",
     "date_posted": "all"
 }
