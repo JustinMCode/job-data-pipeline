@@ -10,18 +10,13 @@ import hashlib
 import asyncio
 from urllib.parse import urlparse
 from dataclasses import dataclass, asdict
-from typing import Optional, List, Dict
-import logging
+from typing import Optional, List
 from more_itertools import chunked
 
 from src.config import S3_BUCKET
 from src.logger import logger
 from src.clients.s3_client import get_s3_client
-from src.ai.openai_processor import (
-    simplify_job_description,
-    simplify_job_highlights,
-    simplify_job_responsibilities
-)
+from src.ai.openai_processor import simplify_job_info
 
 # Constants
 MAX_CONCURRENT_TASKS = 50  # Limit concurrent OpenAI API calls
@@ -108,8 +103,7 @@ async def process_job_async(job: dict, semaphore: asyncio.Semaphore) -> Optional
             job_highlights_obj = job.get("job_highlights", {})
             responsibilities = []
             if job_highlights_obj:
-                responsibilities = job_highlights_obj.pop("Responsibilities", [])
-            
+                responsibilities = job_highlights_obj.pop("Responsibilities", [])            
             # Create base job object
             base_job = {
                 "job_title": job.get("job_title", ""),
@@ -121,24 +115,30 @@ async def process_job_async(job: dict, semaphore: asyncio.Semaphore) -> Optional
                 "job_city": job.get("job_city", ""),
                 "job_state": job.get("job_state", ""),
                 "job_country": job.get("job_country", ""),
-                "job_benefits": job.get("job_benefits"),
                 "date_posted": date_posted,
                 **salaries,
                 "job_hash": job.get("job_id") or generate_job_hash(job)
             }
 
-            # Parallel processing of text fields
-            description, highlights, responsibilities = await asyncio.gather(
-                simplify_job_description(job.get("job_description", "")),
-                simplify_job_highlights(json.dumps(job_highlights_obj)),
-                simplify_job_responsibilities(" ".join(responsibilities)),
-            )
+            job_data = {
+                "job_description": job.get("job_description", ""),
+                "job_highlights": job_highlights_obj,  
+                "job_requirements": " ".join(responsibilities),  
+                "job_benefits": job.get("job_benefits")
+            }
+
+            job_data_json_output = json.dumps(job_data, indent=4)
+
+            # Parallel processing of text fields: gather returns a list of results
+            parsed_job_info_list = await asyncio.gather(simplify_job_info(job_data_json_output))
+            parsed_job_info = parsed_job_info_list[0]  # Extract the dictionary from the list
 
             return ProcessedJob(
                 **base_job,
-                job_description=description,
-                job_highlights=highlights,
-                job_responsibilities=responsibilities
+                job_description=parsed_job_info["job_description"],
+                job_highlights=parsed_job_info["qualifications_needed"],
+                job_responsibilities=parsed_job_info["job_responsibilities"],
+                job_benefits=parsed_job_info["job_benefits"]
             )
 
         except Exception as e:

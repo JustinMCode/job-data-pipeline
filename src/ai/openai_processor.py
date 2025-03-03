@@ -1,5 +1,7 @@
 # src/openai_processor.py
 
+import json
+import re
 import openai
 from openai import AsyncOpenAI
 import hashlib
@@ -25,14 +27,15 @@ def _create_cache_key(prompt_template: str, text: str, **kwargs) -> str:
 async def simplify_text(
     prompt_template: str,
     text: str,
-    max_tokens: int = 150,
+    max_tokens: int = 1000,
     temperature: float = 0.5,
     model: str = OPENAI_MODEL,
     retries: int = 3
-) -> str:
+) -> dict:
     """
     Simplify text using the provided prompt template with ChatCompletion.
-    Implements caching, retries, and proper error handling.
+    Implements caching, retries, and proper error handling. After receiving
+    the response from the API, it parses the output into its four header parts.
 
     Args:
         prompt_template: Template with <<INSERT JOB TEXT HERE>> placeholder
@@ -43,19 +46,29 @@ async def simplify_text(
         retries: Number of retry attempts
 
     Returns:
-        Simplified text or original text on error
+        A dictionary with keys:
+            - job_description
+            - qualifications_needed
+            - job_responsibilities
+            - job_benefits
+        or the original text wrapped in a dict on error.
     """
     if not text.strip():
-        return text
-
-    cache_key = _create_cache_key(prompt_template, text, 
-                                 max_tokens=max_tokens, temperature=temperature)
+        print("Empty text received; returning as is.")
+        return {"job_description": text, "qualifications_needed": "", "job_responsibilities": "", "job_benefits": ""}
+    
+    cache_key = _create_cache_key(prompt_template, text, max_tokens=max_tokens, temperature=temperature)
     
     if cache_key in simplification_cache:
-        logger.debug("Cache hit for simplified text")
-        return simplification_cache[cache_key]
+        print("Cache hit for simplified text")
+        cached_output = simplification_cache[cache_key]
+        parsed = parse_simplified_job_info(cached_output)
+        return parsed
 
     full_prompt = prompt_template.replace("<<INSERT JOB TEXT HERE>>", text)
+    # print("Full prompt being sent to the model:")
+    # print(full_prompt)
+    
     simplified_text = text  # Fallback value
 
     for attempt in range(retries):
@@ -73,76 +86,102 @@ async def simplify_text(
                 temperature=temperature,
             )
             simplified_text = response.choices[0].message.content.strip()
+            print(f"Response received on attempt {attempt+1}:")
             
             # Update cache and enforce size limit
             if len(simplification_cache) >= CACHE_SIZE_LIMIT:
                 simplification_cache.popitem()
             simplification_cache[cache_key] = simplified_text
             
-            logger.info(f"Successfully generated simplified text (attempt {attempt+1})")
+            print(f"Successfully generated simplified text on attempt {attempt+1}")
             break
         except Exception as e:
-            logger.warning(
-                f"Attempt {attempt+1} failed: {str(e)}",
-                exc_info=attempt == retries-1
-            )
+            print(f"Attempt {attempt+1} failed: {str(e)}")
             if attempt == retries - 1:
-                logger.error("All retries exhausted, returning original text")
+                print("All retries exhausted, returning original text")
     
-    return simplified_text
+    # Integrate parsing: convert the raw JSON output into a dictionary with the 4 headers.
+    try:
+        parsed_output = parse_simplified_job_info(simplified_text)
+        return parsed_output
+    except Exception as e:
+        print(f"Parsing failed: {str(e)}. Returning raw simplified text.")
+        #return {"job_description": simplified_text, "qualifications_needed": "", "job_responsibilities": "", "job_benefits": ""}
 
-async def simplify_job_description(description: str) -> str:
+
+async def simplify_job_info(job_data_json_output: str) -> str: 
     """
-    Simplify a job description by focusing on key responsibilities and requirements.
+    Simplify information about the job description, requirements, qualifications, and benefits
     
-    Args:
-        description: Full job description text
-        
-    Returns:
-        Concise summary starting with 'Job Description:'
+    Argss: 
+        job_data_json_output: Json of the job description, requirements, qualifications, and benefits
+
+    Returns: 
+        Concise summary of all job info
     """
     prompt = (
-        "Please simplify the following job description. "
-        "Reword it to provide a concise summary that includes the key responsibilities, "
-        "required skills, and any essential details about the role. "
-        "Remove extraneous language and focus on the most important information.\n\n"
-        "Start the new text with Job Description:\n<<INSERT JOB TEXT HERE>>"
+         "Given the following job information:\n\n"
+        f"{job_data_json_output}\n\n"
+        "1. Job Description: Provide a concise summary tailored to the job.\n"
+        "2. Qualifications Needed: Present clear bullet points, list core skills and qualifications.\n"
+        "3. Job Responsibilities: Present clear bullet points for the main tasks.\n"
+        "4. Job Benefits: Present clear bullet points, list potential benefits (using general examples if necessary).\n\n"
+        "Format your answer using these section headings exactly as shown and convert it to a json object:\n"
+        "- **Job Description:**\n"
+        "- **Qualifications Needed:**\n"
+        "- **Job Responsibilities:**\n"
+        "- **Job Benefits:**"
     )
-    return await simplify_text(prompt, description)
+    return await simplify_text(prompt, job_data_json_output)
 
-async def simplify_job_highlights(highlights: str) -> str:
+
+# Testing 
+def parse_simplified_job_info(api_response: str) -> dict:
     """
-    Simplify job highlights to core qualifications and key skills.
+    Parse the API output containing simplified job information.
+    Extracts the four header sections and returns them as strings.
+    
+    For the list-based sections, returns a bullet list (one bullet per line).
     
     Args:
-        highlights: Job highlights text
-        
-    Returns:
-        Simplified list starting with 'Qualifications Needed:'
-    """
-    prompt = (
-        "Please rephrase the following job highlights, focusing on the core qualifications "
-        "and key skills required for the role. Simplify the content by removing any redundant "
-        "details while preserving all essential information.\n\n"
-        "Start the new text with Qualifications Needed:\n<<INSERT JOB TEXT HERE>>"
-    )
-    return await simplify_text(prompt, highlights)
-
-async def simplify_job_responsibilities(responsibilities: str) -> str:
-    """
-    Simplify job responsibilities into clear, concise bullet points.
+        api_response (str): The raw JSON string from the API output,
+                            which may be wrapped in code block markers.
     
-    Args:
-        responsibilities: List of job responsibilities
-        
     Returns:
-        Cleaned bullet points starting with 'Job Responsibilities:'
+        dict: A dictionary with the following keys:
+            - job_description
+            - qualifications_needed
+            - job_responsibilities
+            - job_benefits
+        Each value is a string.
     """
-    prompt = (
-        "Please simplify the following list of job responsibilities. "
-        "Reword the content into clear and concise bullet points that capture "
-        "the core tasks and expectations of the role. "
-        "Eliminate any unnecessary or repetitive details.\n\n"
-        "Start the new text with Job Responsibilities:\n<<INSERT JOB TEXT HERE>>"
-    )
-    return await simplify_text(prompt, responsibilities)
+    # Remove any code block markers (```json and ```)
+    cleaned_response = re.sub(r"```(json)?", "", api_response).strip()
+    cleaned_response = re.sub(r"```", "", cleaned_response).strip()
+    
+    try:
+        data = json.loads(cleaned_response)
+    except json.JSONDecodeError as e:
+        raise ValueError("Failed to parse API response as valid JSON") from e
+
+    # Extract the Job Description
+    job_description = data.get("Job Description", "").strip()
+    
+    # For list values, create a bullet list (each item on a new line prefixed by a bullet marker)
+    def make_bullet_list(items):
+        if isinstance(items, list):
+            # Remove any extraneous spaces and create a bullet point for each item
+            return "\n".join(f"• {item.strip()}" for item in items)
+        else:
+            return str(items).strip()
+    
+    qualifications_needed = make_bullet_list(data.get("Qualifications Needed", []))
+    job_responsibilities = make_bullet_list(data.get("Job Responsibilities", []))
+    job_benefits = make_bullet_list(data.get("Job Benefits", []))
+
+    return {
+        "job_description": job_description,
+        "qualifications_needed": qualifications_needed,
+        "job_responsibilities": job_responsibilities,
+        "job_benefits": job_benefits
+    }

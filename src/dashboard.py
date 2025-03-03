@@ -96,6 +96,12 @@ def format_salary(job: dict) -> str:
 
 def display_job_card(job: dict):
     """Render a single job card with expandable details"""
+    def format_markdown_bullets(text: str) -> str:
+        """Convert bullet points to Markdown format"""
+        if not text:
+            return ""
+        return text.replace('•', '*').replace('\n', '  \n')
+    
     with st.container():
         col1, col2 = st.columns([3, 1])
         
@@ -114,17 +120,21 @@ def display_job_card(job: dict):
             st.link_button("Apply Now", job["job_application_link"])
         
         # Collapsible details section
+        # Collapsible details section
         with st.expander("View Job Details"):
             tab1, tab2, tab3 = st.tabs(["Description", "Responsibilities", "Benefits"])
             
             with tab1:
-                st.write(job["job_description"] or "No description available")
+                desc = format_markdown_bullets(job["job_description"])
+                st.markdown(desc or "*No description available*")
                 
             with tab2:
-                st.write(job["job_responsibilities"] or "No responsibilities listed")
+                resp = format_markdown_bullets(job["job_responsibilities"])
+                st.markdown(resp or "*No responsibilities listed*")
                 
             with tab3:
-                st.write(job["job_benefits"] or "No benefits information available")
+                benefits = format_markdown_bullets(job["job_benefits"])
+                st.markdown(benefits or "*No benefits information available*")
 
 def main():
     """Main dashboard layout and logic"""
@@ -139,7 +149,7 @@ def main():
         location = st.text_input("Location")
         employment_type = st.selectbox(
             "Employment Type",
-            ["", "Full-time", "Part-time", "Contract", "Temporary"]
+            ["", "Full-time", "Part-time", "Contract", "Internship"]
         )
         min_salary = st.number_input("Minimum Salary (USD)", min_value=0, step=10000)
         remote_only = st.checkbox("Remote Only")
