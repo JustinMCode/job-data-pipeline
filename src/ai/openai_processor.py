@@ -7,7 +7,7 @@ from openai import AsyncOpenAI
 import hashlib
 import logging
 from typing import Optional
-from src.config import OPENAI_KEY, OPENAI_MODEL
+from src.utils.config import OPENAI_KEY, OPENAI_MODEL
 
 # Configure OpenAI client
 client = AsyncOpenAI(api_key=OPENAI_KEY)

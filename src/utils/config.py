@@ -25,3 +25,7 @@ DB_PORT = os.getenv("DB_PORT")
 # OpenAI configuration
 OPENAI_KEY = os.getenv("OPENAI_KEY")
 OPENAI_MODEL = "gpt-3.5-turbo"
+
+POOL_MIN_CONN = 1
+POOL_MAX_CONN = 10
+CONNECTION_TIMEOUT = 30

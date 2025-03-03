@@ -11,8 +11,8 @@ from tenacity import (
     before_sleep_log
 )
 from requests.exceptions import RequestException, HTTPError
-from src.config import RAPIDAPI_KEY, S3_BUCKET, RAPIDAPI_HOST, API_REQUEST_TIMEOUT
-from src.logger import logger
+from src.utils.config import RAPIDAPI_KEY, S3_BUCKET, RAPIDAPI_HOST, API_REQUEST_TIMEOUT
+from src.utils.logger import logger
 from src.clients.s3_client import get_s3_client
 
 # Constants

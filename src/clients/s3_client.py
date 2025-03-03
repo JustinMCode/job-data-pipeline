@@ -1,5 +1,5 @@
 import boto3
-from src.config import AWS_ACCESS_KEY, AWS_SECRET_KEY
+from src.utils.config import AWS_ACCESS_KEY, AWS_SECRET_KEY
 
 def get_s3_client():
     """

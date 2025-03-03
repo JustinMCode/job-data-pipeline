@@ -2,7 +2,7 @@
 from src.jobs.fetch_jobs import main_fetch
 from src.jobs.process_jobs import process_jobs
 from src.jobs.load_to_postgresql import load_data_to_postgres
-from src.logger import logger
+from src.utils.logger import logger
 
 def main(): 
     try:

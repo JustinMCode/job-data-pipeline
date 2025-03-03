@@ -4,8 +4,8 @@ import streamlit as st
 import psycopg2
 from datetime import datetime
 from typing import List, Dict
-from src.config import DB_HOST, DB_NAME, DB_USER, DB_PASS, DB_PORT
-from src.logger import logger
+from src.utils.config import DB_HOST, DB_NAME, DB_USER, DB_PASS, DB_PORT
+from src.utils.logger import logger
 
 # Page configuration
 st.set_page_config(
