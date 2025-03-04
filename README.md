@@ -1,7 +1,7 @@
 # AI-Powered Job Board Aggregator
 End-to-End Data Pipeline with AI Integration
 
-A scalable platform that aggregates, processes, and visualizes tech job listings using AI-driven insights. The system automates data ingestion from multiple sources, enriches job details via natural language processing, and delivers an interactive dashboard for users to explore opportunities.
+A platform that aggregates, processes, and visualizes job listings using AI-driven insights. The system automates data ingestion from multiple sources, enriches job details via natural language processing, and delivers an interactive dashboard for users to explore opportunities.
 
 ## Key Features
 <li> AI-Powered Processing: Leveraged OpenAI GPT-3.5 to summarize job descriptions, responsibilities, and benefits, extracting structured data from unstructured text.
