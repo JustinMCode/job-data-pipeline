@@ -55,9 +55,10 @@ def fetch_jobs(filters: dict = None) -> List[Dict]:
             conditions.append("(job_location ILIKE %s OR job_city ILIKE %s)")
             params.extend([f"%{filters['location']}%"]*2)
             
+        # Change from exact match to pattern matching
         if filters.get("employment_type"):
-            conditions.append("job_employment_type = %s")
-            params.append(filters["employment_type"])
+            conditions.append("job_employment_type ILIKE %s")
+            params.append(f"%{filters['employment_type']}%")
             
         if filters.get("remote_only"):
             conditions.append("job_is_remote = TRUE")
@@ -87,12 +88,24 @@ def fetch_jobs(filters: dict = None) -> List[Dict]:
             conn.close()
 
 def format_salary(job: dict) -> str:
-    """Format salary information"""
+    """Format salary information with proper Unicode characters"""
+    salary_style = (
+        "font-size: 1rem; "
+        "font-weight: 500; "
+        "font-family: sans-serif;"
+    )
+    
     if job.get('job_salary'):
-        return f"${job['job_salary']:,.0f}"
+        return f"<span style='{salary_style}'>${job['job_salary']:,.0f}</span>"
+        
     if job.get('job_min_salary') and job.get('job_max_salary'):
-        return f"${job['job_min_salary']:,.0f} - ${job['job_max_salary']:,.0f}"
-    return "Not specified"
+        return (
+            f"<span style='{salary_style}'>"
+            f"${job['job_min_salary']:,.0f} – ${job['job_max_salary']:,.0f}"
+            "</span>"
+        )
+    
+    return "<span style='font-size: 1rem'>Not specified</span>"
 
 def display_job_card(job: dict):
     """Render a single job card with expandable details"""
@@ -114,8 +127,11 @@ def display_job_card(job: dict):
                 
             st.write(f"📅 **Posted:** {job['date_posted'].strftime('%Y-%m-%d') if job['date_posted'] else 'N/A'}")
             st.write(f"💼 **Employment Type:** {job['job_employment_type'] or 'Not specified'}")
-            st.write(f"💰 **Salary:** {format_salary(job)}")
-            
+            st.markdown(
+                f'<div style="margin: 5px 0;">💰 <strong>Salary:</strong> {format_salary(job)}</div>',
+                unsafe_allow_html=True
+            )
+                        
         with col2:
             st.link_button("Apply Now", job["job_application_link"])
         
@@ -149,7 +165,8 @@ def main():
         location = st.text_input("Location")
         employment_type = st.selectbox(
             "Employment Type",
-            ["", "Full-time", "Part-time", "Contract", "Internship"]
+            ["", "Full-time", "Part-time", "Contract", "Internship"],
+            format_func=lambda x: "Any" if x == "" else x
         )
         min_salary = st.number_input("Minimum Salary (USD)", min_value=0, step=10000)
         remote_only = st.checkbox("Remote Only")
